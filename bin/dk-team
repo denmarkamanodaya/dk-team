@@ -1,0 +1,239 @@
+#!/usr/bin/env bash
+# dk-team — install and manage a Claude Code agent team (lead, manager, implementers, tester,
+# reviewer, auditor), the dk-coding skills and rules, the guard hooks and the dk-watch dashboard.
+# macOS and Linux. Needs: bash, node >= 20, git. Usage: dk-team help
+set -euo pipefail
+
+VERSION="1.0.0"
+SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/$(basename "${BASH_SOURCE[0]}")"
+# Resolve the repo root (bin/..), following a symlink in ~/.local/bin.
+REAL="$SELF"; while [ -L "$REAL" ]; do L="$(readlink "$REAL")"; case "$L" in /*) REAL="$L";; *) REAL="$(dirname "$REAL")/$L";; esac; done
+REPO="$(cd "$(dirname "$REAL")/.." && pwd -P)"
+SRC="$REPO/claude"
+BIN_DIR="${DK_BIN_DIR:-$HOME/.local/bin}"
+
+c_bold=$'\033[1m'; c_dim=$'\033[2m'; c_red=$'\033[31m'; c_grn=$'\033[32m'; c_ylw=$'\033[33m'; c_off=$'\033[0m'
+[ -t 1 ] || { c_bold=; c_dim=; c_red=; c_grn=; c_ylw=; c_off=; }
+say()  { printf '%s\n' "$*"; }
+ok()   { printf '%s✓%s %s\n' "$c_grn" "$c_off" "$*"; }
+warn() { printf '%s!%s %s\n' "$c_ylw" "$c_off" "$*"; }
+die()  { printf '%s✗ %s%s\n' "$c_red" "$*" "$c_off" >&2; exit 1; }
+
+usage() {
+  cat <<EOF
+${c_bold}dk-team ${VERSION}${c_off} — a Claude Code agent team with a live dashboard
+
+${c_bold}Usage${c_off}
+  dk-team install [--dir DIR] [--hooks watch|guard|all|none] [--allow-push] [--yes]
+  dk-team uninstall [--dir DIR] [--yes]
+  dk-team update                 git pull this repo, then re-install with the same options
+  dk-team doctor [--dir DIR]     check that everything is in place
+  dk-team test                   run the bundled test suites
+  dk-team watch [start|stop|status|logs|autostart|no-autostart]
+  dk-team version | help
+
+${c_bold}Install options${c_off}
+  --dir DIR      Claude config dir to install into (default: ~/.claude = every project).
+                 Use a project's .claude folder (e.g. ~/Projects/.claude) to scope it.
+  --hooks MODE   watch  dashboard feed only (default; never blocks anything)
+                 guard  the dk-coding guard hooks H1–H7 (can block bad edits / risky commands)
+                 all    both;  none  no hooks
+  --allow-push   don't add the local-only rules that stop Claude from git push / gh pr / gh workflow run
+  --yes          don't ask for confirmation
+
+Files go to DIR/agents, DIR/skills and DIR/dk-team (rules, hooks, tools, profiles).
+Hooks and permission rules are merged into DIR/settings.json; a backup is kept in DIR/dk-team/backups.
+EOF
+}
+
+need() {
+  command -v node >/dev/null 2>&1 || die "node is required (>= 20). Install it from https://nodejs.org or with your package manager."
+  local major; major="$(node -p 'process.versions.node.split(".")[0]')"
+  [ "$major" -ge 20 ] || die "node >= 20 required (found $(node -v))."
+  command -v git >/dev/null 2>&1 || die "git is required."
+}
+
+expand_dir() { local d="${1/#\~/$HOME}"; mkdir -p "$d"; (cd "$d" && pwd -P); }
+
+confirm() {
+  [ "${YES:-0}" = 1 ] && return 0
+  [ -t 0 ] || return 0
+  printf '%s [Y/n] ' "$1"; read -r a; case "${a:-y}" in y|Y|yes) return 0;; *) die "Cancelled.";; esac
+}
+
+# Copies one tree into the target, filling in @DK_HOME@ / @DK_TEAM@, recording each file in the manifest.
+copy_tree() { # src dst
+  local src="$1" dst="$2"
+  (cd "$src" && find . -type f ! -name '.DS_Store' -print) | while IFS= read -r rel; do
+    rel="${rel#./}"
+    local out="$dst/$rel"
+    mkdir -p "$(dirname "$out")"
+    if [ -f "$out" ] && [ ! -f "$BACKUP/files/${out#$DK_HOME/}" ]; then
+      mkdir -p "$(dirname "$BACKUP/files/${out#$DK_HOME/}")"; cp -p "$out" "$BACKUP/files/${out#$DK_HOME/}"
+    fi
+    case "$rel" in
+      *.md|*.mjs|*.json|*.html|*.sh|dk-watch)
+        sed -e "s#@DK_HOME@#${DK_HOME}#g" -e "s#@DK_TEAM@#${DK_TEAM}#g" "$src/$rel" > "$out" ;;
+      *) cp "$src/$rel" "$out" ;;
+    esac
+    printf '%s\n' "$out" >> "$MANIFEST.new"
+  done
+}
+
+settings_merge() { # mode: add|remove
+  node - "$DK_HOME/settings.json" "$1" "$HOOKS" "$ALLOW_PUSH" "$DK_TEAM" <<'JS'
+const fs = require('fs');
+const [file, mode, hooksMode, allowPush, team] = process.argv.slice(2);
+let s = {};
+try { s = JSON.parse(fs.readFileSync(file, 'utf8')); } catch (e) { if (fs.existsSync(file)) { console.error('settings.json is not valid JSON; not touching it'); process.exit(3); } }
+const MARK = `${team}/hooks/`;
+const DENY = ['Bash(git push:*)', 'Bash(gh pr create:*)', 'Bash(gh pr merge:*)', 'Bash(gh workflow run:*)'];
+// 1. drop every hook entry we added before (identified by our hooks folder in the command)
+if (s.hooks) {
+  for (const ev of Object.keys(s.hooks)) {
+    s.hooks[ev] = (s.hooks[ev] || []).map((g) => ({ ...g, hooks: (g.hooks || []).filter((h) => !String(h.command || '').includes(MARK)) }))
+      .filter((g) => (g.hooks || []).length);
+    if (!s.hooks[ev].length) delete s.hooks[ev];
+  }
+  if (!Object.keys(s.hooks).length) delete s.hooks;
+}
+if (s.permissions?.deny) {
+  s.permissions.deny = s.permissions.deny.filter((r) => !DENY.includes(r));
+  if (!s.permissions.deny.length) delete s.permissions.deny;
+  if (!Object.keys(s.permissions).length) delete s.permissions;
+}
+if (mode === 'add') {
+  const add = (snippetFile) => {
+    const snip = JSON.parse(fs.readFileSync(snippetFile, 'utf8')).hooks;
+    s.hooks = s.hooks || {};
+    for (const [ev, groups] of Object.entries(snip)) s.hooks[ev] = [...(s.hooks[ev] || []), ...groups];
+  };
+  if (hooksMode === 'guard' || hooksMode === 'all') add(`${team}/hooks/settings-snippet.json`);
+  if (hooksMode === 'watch' || hooksMode === 'all') add(`${team}/hooks/watch-settings-snippet.json`);
+  if (allowPush !== '1') {
+    s.permissions = s.permissions || {};
+    s.permissions.deny = [...new Set([...(s.permissions.deny || []), ...DENY])];
+  }
+}
+fs.writeFileSync(file, JSON.stringify(s, null, 2) + '\n');
+JS
+}
+
+cmd_install() {
+  local dir="$HOME/.claude"; HOOKS="watch"; ALLOW_PUSH=0; YES=0
+  while [ $# -gt 0 ]; do case "$1" in
+    --dir) dir="$2"; shift 2;; --dir=*) dir="${1#*=}"; shift;;
+    --hooks) HOOKS="$2"; shift 2;; --hooks=*) HOOKS="${1#*=}"; shift;;
+    --allow-push) ALLOW_PUSH=1; shift;; --yes|-y) YES=1; shift;;
+    *) die "Unknown option: $1 (see dk-team help)";; esac; done
+  case "$HOOKS" in watch|guard|all|none) ;; *) die "--hooks must be watch, guard, all or none";; esac
+  need
+  [ -d "$SRC/agents" ] || die "Can't find the bundle at $SRC. Run dk-team from the cloned repo."
+  DK_HOME="$(expand_dir "$dir")"; DK_TEAM="$DK_HOME/dk-team"
+  say "${c_bold}Installing dk-team ${VERSION}${c_off} into ${DK_HOME}"
+  say "  agents  → $DK_HOME/agents      skills → $DK_HOME/skills"
+  say "  rules, hooks, tools, profiles → $DK_TEAM"
+  say "  hooks: $HOOKS   local-only guard: $([ "$ALLOW_PUSH" = 1 ] && echo off || echo on)   commands → $BIN_DIR"
+  confirm "Continue?"
+  BACKUP="$DK_TEAM/backups/$(date +%Y%m%d-%H%M%S)"; mkdir -p "$BACKUP/files" "$DK_TEAM"
+  MANIFEST="$DK_TEAM/manifest.txt"; : > "$MANIFEST.new"
+  [ -f "$DK_HOME/settings.json" ] && cp -p "$DK_HOME/settings.json" "$BACKUP/settings.json"
+  copy_tree "$SRC/agents" "$DK_HOME/agents"
+  copy_tree "$SRC/skills" "$DK_HOME/skills"
+  for d in rules hooks tools; do copy_tree "$SRC/$d" "$DK_TEAM/$d"; done
+  # profiles: ship the example, never overwrite the user's own
+  mkdir -p "$DK_TEAM/profiles"
+  for p in "$REPO/profiles/"*.md; do
+    [ -f "$DK_TEAM/profiles/$(basename "$p")" ] && [ "$(basename "$p")" != "example.md" ] && continue
+    sed -e "s#@DK_HOME@#${DK_HOME}#g" -e "s#@DK_TEAM@#${DK_TEAM}#g" "$p" > "$DK_TEAM/profiles/$(basename "$p")"
+  done
+  # commands
+  mkdir -p "$BIN_DIR"
+  sed -e "s#@DK_TEAM@#${DK_TEAM}#g" "$REPO/bin/dk-watch" > "$BIN_DIR/dk-watch"; chmod +x "$BIN_DIR/dk-watch"
+  ln -sf "$REAL" "$BIN_DIR/dk-team"
+  printf '%s\n' "$BIN_DIR/dk-watch" "$BIN_DIR/dk-team" >> "$MANIFEST.new"
+  # files from an older install that this version no longer ships
+  if [ -f "$MANIFEST" ]; then
+    grep -vxF -f "$MANIFEST.new" "$MANIFEST" | while IFS= read -r old; do [ -f "$old" ] && rm -f "$old" && say "  removed stale $old"; done || true
+  fi
+  mv "$MANIFEST.new" "$MANIFEST"
+  settings_merge add
+  printf 'dir=%s\nhooks=%s\nallow_push=%s\nrepo=%s\nversion=%s\n' "$DK_HOME" "$HOOKS" "$ALLOW_PUSH" "$REPO" "$VERSION" > "$DK_TEAM/install.conf"
+  # remember the last install dir for update/doctor/uninstall
+  mkdir -p "$HOME/.config/dk-team"; printf '%s\n' "$DK_HOME" > "$HOME/.config/dk-team/last-dir"
+  ok "Installed $(wc -l < "$MANIFEST" | tr -d ' ') files. Backup: $BACKUP"
+  case ":$PATH:" in *":$BIN_DIR:"*) ;; *) warn "$BIN_DIR is not on your PATH. Add: export PATH=\"$BIN_DIR:\$PATH\" to ~/.zshrc or ~/.bashrc";; esac
+  say ""
+  say "${c_bold}Next${c_off}"
+  say "  1. dk-watch                      start the dashboard (http://127.0.0.1:4777)"
+  say "  2. Restart Claude Code, then run /agents and /hooks to check"
+  say "  3. In Claude Code: /dk-agents <your goal>      (or /dk-agents <profile> P0 with a profile)"
+}
+
+last_dir() { local d=""; [ -f "$HOME/.config/dk-team/last-dir" ] && d="$(cat "$HOME/.config/dk-team/last-dir")"; printf '%s' "${d:-$HOME/.claude}"; }
+
+cmd_uninstall() {
+  local dir; dir="$(last_dir)"; YES=0
+  while [ $# -gt 0 ]; do case "$1" in --dir) dir="$2"; shift 2;; --dir=*) dir="${1#*=}"; shift;; --yes|-y) YES=1; shift;; *) die "Unknown option: $1";; esac; done
+  need
+  DK_HOME="$(expand_dir "$dir")"; DK_TEAM="$DK_HOME/dk-team"; MANIFEST="$DK_TEAM/manifest.txt"
+  [ -f "$MANIFEST" ] || die "No dk-team install found in $DK_HOME."
+  confirm "Remove dk-team from $DK_HOME (your profiles and backups are kept)?"
+  "$BIN_DIR/dk-watch" stop >/dev/null 2>&1 || true
+  [ -f "$DK_HOME/settings.json" ] && { mkdir -p "$DK_TEAM/backups"; cp -p "$DK_HOME/settings.json" "$DK_TEAM/backups/settings-before-uninstall.json"; }
+  HOOKS=none; ALLOW_PUSH=1; settings_merge remove
+  while IFS= read -r f; do [ -f "$f" ] || [ -L "$f" ] && rm -f "$f"; done < "$MANIFEST"
+  rm -f "$MANIFEST" "$DK_TEAM/install.conf"
+  find "$DK_HOME/agents" "$DK_HOME/skills" "$DK_TEAM" -type d -empty -delete 2>/dev/null || true
+  ok "Removed. Kept: $DK_TEAM/profiles and $DK_TEAM/backups (delete them yourself if you want)."
+}
+
+cmd_update() {
+  need
+  local conf; conf="$(last_dir)/dk-team/install.conf"; [ -f "$conf" ] || die "No previous install found; run dk-team install."
+  # shellcheck disable=SC1090
+  . "$conf"
+  git -C "$REPO" pull --ff-only
+  local args=(--dir "$dir" --hooks "$hooks" --yes); [ "$allow_push" = 1 ] && args+=(--allow-push)
+  exec "$REPO/bin/dk-team" install "${args[@]}"
+}
+
+cmd_doctor() {
+  local dir; dir="$(last_dir)"
+  while [ $# -gt 0 ]; do case "$1" in --dir) dir="$2"; shift 2;; --dir=*) dir="${1#*=}"; shift;; *) die "Unknown option: $1";; esac; done
+  local d="${dir/#\~/$HOME}" bad=0
+  say "${c_bold}dk-team doctor${c_off} ($d)"
+  command -v node >/dev/null && ok "node $(node -v)" || { warn "node missing"; bad=1; }
+  command -v git  >/dev/null && ok "git $(git --version | awk '{print $3}')" || { warn "git missing"; bad=1; }
+  command -v claude >/dev/null && ok "claude $(claude --version 2>/dev/null | head -1)" || warn "Claude Code not found (install: curl -fsSL https://claude.ai/install.sh | bash)"
+  command -v tmux >/dev/null && ok "tmux (agent team panes)" || warn "tmux not found: teammates still work, but there are no split panes"
+  [ -f "$d/dk-team/install.conf" ] && ok "installed: $(grep -E '^(version|hooks)=' "$d/dk-team/install.conf" | tr '\n' ' ')" || { warn "not installed in $d"; bad=1; }
+  for a in dk-manager dk-implementer dk-tester dk-reviewer dk-auditor; do [ -f "$d/agents/$a.md" ] || { warn "missing agent $a"; bad=1; }; done
+  for s in dk-agents dk-coding dk-review dk-dry dk-new-unit dk-bump; do [ -f "$d/skills/$s/SKILL.md" ] || { warn "missing skill $s"; bad=1; }; done
+  [ "$bad" = 0 ] && ok "agents and skills present"
+  if [ -f "$d/settings.json" ]; then
+    grep -q "dk-team/hooks/h8-watch" "$d/settings.json" && ok "dashboard hook enabled" || say "  ${c_dim}dashboard hook off (dk-team install --hooks watch)${c_off}"
+    grep -q "dk-team/hooks/h1-side-effects" "$d/settings.json" && ok "guard hooks enabled" || say "  ${c_dim}guard hooks off (dk-team install --hooks guard)${c_off}"
+    grep -q 'Bash(git push:\*)' "$d/settings.json" && ok "local-only guard on" || say "  ${c_dim}local-only guard off${c_off}"
+  fi
+  command -v dk-watch >/dev/null && { dk-watch status | sed 's/^/  dashboard: /'; } || warn "dk-watch not on PATH ($BIN_DIR)"
+  [ "$bad" = 0 ] || exit 1
+}
+
+cmd_test() {
+  need
+  say "${c_bold}hooks${c_off}";   (cd "$SRC/hooks" && node --test __tests__/*.test.mjs)
+  say "${c_bold}dk-coding scripts${c_off}"; (cd "$SRC/skills/dk-coding/scripts" && node --test __tests__/*.test.mjs)
+}
+
+case "${1:-help}" in
+  install)   shift; cmd_install "$@";;
+  uninstall) shift; cmd_uninstall "$@";;
+  update)    shift; cmd_update "$@";;
+  doctor)    shift; cmd_doctor "$@";;
+  test)      shift; cmd_test "$@";;
+  watch)     shift; exec "$BIN_DIR/dk-watch" "$@";;
+  version|-v|--version) echo "dk-team $VERSION";;
+  help|-h|--help) usage;;
+  *) usage; exit 2;;
+esac

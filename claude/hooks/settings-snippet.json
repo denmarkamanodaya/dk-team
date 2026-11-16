@@ -1,0 +1,75 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"@DK_TEAM@/hooks/h1-side-effects.mjs\"",
+            "timeout": 10
+          },
+          {
+            "type": "command",
+            "command": "node \"@DK_TEAM@/hooks/h2-layout.mjs\"",
+            "timeout": 10
+          },
+          {
+            "type": "command",
+            "command": "node \"@DK_TEAM@/hooks/h6-frozen.mjs\"",
+            "timeout": 10
+          }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"@DK_TEAM@/hooks/h5-bash-guard.mjs\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"@DK_TEAM@/hooks/h3-post-edit.mjs\"",
+            "timeout": 30
+          },
+          {
+            "type": "command",
+            "command": "node \"@DK_TEAM@/hooks/h7-rules-frontmatter.mjs\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"@DK_TEAM@/hooks/h4-stop-gate.mjs\"",
+            "timeout": 300
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"@DK_TEAM@/hooks/h4-stop-gate.mjs\"",
+            "timeout": 300
+          }
+        ]
+      }
+    ]
+  }
+}

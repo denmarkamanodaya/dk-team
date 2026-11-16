@@ -1,0 +1,246 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>dk-watch · agent team</title>
+<link rel="icon" href="data:,">
+<style>
+  :root { color-scheme: dark; --bg:#0e0e10; --panel:#17171a; --raised:#212126; --line:#2a2a31; --text:#ededef; --muted:#9898a1;
+    --lead:#f5c451; --manager:#b18cff; --implementer:#3ddc97; --tester:#ffd166; --auditor:#ff6b6b; --reviewer:#5aa9ff; --explore:#2dd4bf; --other:#c0c0c8; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:13px/1.45 Inter, system-ui, -apple-system, sans-serif; }
+  header { display:flex; align-items:center; gap:12px; padding:14px 20px; border-bottom:1px solid var(--line); flex-wrap:wrap; }
+  header h1 { font-size:15px; margin:0; font-weight:600; }
+  .dot { width:8px; height:8px; border-radius:50%; background:#555; display:inline-block; }
+  .dot.on { background:#3ddc97; box-shadow:0 0 8px #3ddc97; }
+  select, button { background:var(--raised); color:var(--text); border:1px solid var(--line); border-radius:6px; height:30px; padding:0 10px; font:inherit; cursor:pointer; }
+  .spacer { flex:1; }
+  main { display:grid; grid-template-columns: 1fr 420px; gap:1px; background:var(--line); min-height: calc(100vh - 59px); }
+  section { background:var(--bg); padding:16px 20px; overflow:auto; }
+  h2 { font-size:11px; text-transform:uppercase; letter-spacing:.07em; color:var(--muted); margin:0 0 12px; font-weight:600; }
+  .grid { display:grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap:12px; }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:14px; display:flex; flex-direction:column; gap:10px; position:relative; }
+  .card.working { border-color: color-mix(in srgb, var(--c) 60%, transparent); box-shadow: 0 0 0 1px color-mix(in srgb, var(--c) 30%, transparent), 0 0 24px -8px var(--c); }
+  .head { display:flex; gap:10px; align-items:center; }
+  .avatar { width:40px; height:40px; border-radius:10px; display:flex; align-items:center; justify-content:center; background: color-mix(in srgb, var(--c) 18%, transparent); color:var(--c); flex:none; }
+  .card.working .avatar { animation: pulse 1.4s ease-in-out infinite; }
+  @keyframes pulse { 50% { box-shadow: 0 0 0 6px color-mix(in srgb, var(--c) 15%, transparent); } }
+  .name { font-weight:600; }
+  .role { color:var(--muted); font-size:12px; }
+  .badge { margin-left:auto; font-size:11px; padding:2px 8px; border-radius:999px; background:var(--raised); color:var(--muted); white-space:nowrap; }
+  .badge.working { color:#0e0e10; background:var(--c); }
+  .badge.done { color:#3ddc97; }
+  .badge.error { color:#0e0e10; background:#ff6b6b; }
+  .badge.waiting { color:#0e0e10; background:#ededef; }
+  .badge.teamwork { color:#5aa9ff; }
+  .card.old { opacity:.55; }
+  .now { background:var(--raised); border-radius:8px; padding:8px 10px; min-height:36px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .now b { color:var(--c); font-weight:600; }
+  .stats { display:flex; gap:14px; color:var(--muted); font-size:12px; }
+  .stats span b { color:var(--text); font-weight:600; }
+  .feed { display:flex; flex-direction:column; gap:2px; font-size:12px; }
+  .row { display:grid; grid-template-columns: 56px 18px 1fr; gap:8px; align-items:start; padding:5px 6px; border-radius:6px; }
+  .row:hover { background:var(--panel); }
+  .t { color:var(--muted); font-variant-numeric: tabular-nums; }
+  .ic { color:var(--c); display:flex; padding-top:1px; }
+  .msg { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .msg .who { color:var(--c); font-weight:600; margin-right:6px; }
+  .msg .ev { color:var(--muted); margin-right:6px; }
+  .err { color:#ff6b6b; }
+  .empty { color:var(--muted); padding:24px; border:1px dashed var(--line); border-radius:12px; text-align:center; }
+  .legend { display:flex; gap:12px; flex-wrap:wrap; color:var(--muted); font-size:12px; margin-top:16px; }
+  .legend span { display:flex; align-items:center; gap:6px; }
+  @media (max-width: 900px) { main { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<header>
+  <span class="dot" id="live" aria-hidden="true"></span>
+  <h1>dk-watch</h1>
+  <span id="status" class="role">connecting…</span>
+  <span class="spacer"></span>
+  <label class="role" for="session">Show</label>
+  <select id="session"></select>
+  <label class="role" for="filter">Feed</label>
+  <select id="filter"><option value="">All agents</option></select>
+  <button type="button" id="clear">Clear</button>
+</header>
+<main>
+  <section aria-labelledby="team-h">
+    <h2 id="team-h">Team</h2>
+    <div class="grid" id="team"></div>
+    <div class="legend" id="legend"></div>
+  </section>
+  <section aria-labelledby="feed-h">
+    <h2 id="feed-h">Activity</h2>
+    <div class="feed" id="feed" aria-live="polite"></div>
+  </section>
+</main>
+<script>
+const ICONS = {
+  lead: '<path d="M3 17h18l-2-10-5 4-2-6-2 6-5-4z"/><path d="M5 20h14"/>',
+  manager: '<rect x="5" y="4" width="14" height="17" rx="2"/><path d="M9 4h6v3H9z"/><path d="M9 13l2 2 4-4"/>',
+  implementer: '<path d="M14.7 6.3a4 4 0 0 0-5.4 5.2L4 16.8V20h3.2l5.3-5.3a4 4 0 0 0 5.2-5.4l-2.4 2.4-2.4-.6-.6-2.4z"/>',
+  tester: '<path d="M9 3h6"/><path d="M10 3v6L5 18a2 2 0 0 0 1.8 3h10.4A2 2 0 0 0 19 18l-5-9V3"/><path d="M7.5 14h9"/>',
+  auditor: '<path d="M12 3l8 3v6c0 4.5-3.4 8.3-8 9-4.6-.7-8-4.5-8-9V6z"/><path d="M9 12l2 2 4-4"/>',
+  reviewer: '<circle cx="11" cy="11" r="6"/><path d="M20 20l-4.5-4.5"/>',
+  explore: '<circle cx="12" cy="12" r="9"/><path d="M15.5 8.5l-2 5-5 2 2-5z"/>',
+  other: '<rect x="5" y="8" width="14" height="11" rx="3"/><path d="M12 4v4"/><circle cx="9.5" cy="13" r="1"/><circle cx="14.5" cy="13" r="1"/>',
+};
+const ROLE_LABEL = { lead:'Lead · Opus', manager:'Manager · Opus', implementer:'Implementer · Sonnet', tester:'Tester · Sonnet',
+  auditor:'Auditor · Opus', reviewer:'Reviewer · Sonnet', explore:'Explorer', other:'Teammate' };
+const RECENT_MS = 60 * 60 * 1000;   // the default view shows everything active in the last hour
+const BUSY_MS = 120 * 1000;         // a teammate counts as busy if it acted in the last 2 minutes
+
+const $ = (id) => document.getElementById(id);
+const agents = new Map();
+let all = [];
+
+function guessRole(text) {
+  const t = (text || '').toLowerCase();
+  for (const r of ['manager','implementer','tester','auditor','reviewer']) if (t.includes(r)) return r;
+  if (t.includes('explore') || t.includes('plan')) return 'explore';
+  return null;
+}
+function isLeadEvent(e) { return !e.agentId && !e.teammate; }
+function keyOf(e) { return (e.session || '?') + '|' + (e.agentId || 'main'); }
+function fmtTime(ms) { return new Date(ms).toTimeString().slice(0, 8); }
+function ago(ms) { const s = Math.max(0, Math.round((Date.now() - ms) / 1000)); return s < 60 ? s + 's' : Math.round(s / 60) + 'm'; }
+function esc(s) { return String(s).replace(/[&<>"']/g, (c) => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[c])); }
+function isApproval(e) { return /permission|approv/i.test(e.kind || '') || /permission|approv/i.test(e.message || ''); }
+
+function displayName(a) {
+  if (a.role === 'lead') return `Lead · started ${fmtTime(a.first).slice(0, 5)}${a.cwd ? ' · ' + a.cwd : ''}`;
+  if (a.type) return a.type;
+  if (a.worktree) return `teammate · ${a.worktree}`;
+  return 'teammate';
+}
+
+function apply(e) {
+  if (e.event === 'Cleared') { agents.clear(); all = []; return; }
+  all.push(e); if (all.length > 3000) all.shift();
+  const k = keyOf(e);
+  let a = agents.get(k);
+  if (!a) {
+    const lead = isLeadEvent(e);
+    a = { key:k, session:e.session, id:e.agentId, type:e.agentType, worktree:e.worktree, cwd:e.cwd,
+          role: lead ? 'lead' : (guessRole(e.agentType) || guessRole(e.worktree) || 'other'),
+          first:e.at, last:e.at, tools:0, edits:0, errors:0, status:'working', now:'' };
+    agents.set(k, a);
+  }
+  if (e.teammate && a.role === 'lead') a.role = guessRole(e.agentType) || guessRole(e.worktree) || 'other';
+  if (e.agentType && !a.type) { a.type = e.agentType; a.role = guessRole(e.agentType) || a.role; }
+  if (e.worktree && !a.worktree) a.worktree = e.worktree;
+  if (e.cwd && !a.cwd) a.cwd = e.cwd;
+  a.last = e.at;
+  switch (e.event) {
+    case 'SessionStart': a.status = 'idle'; a.now = 'Session started'; break;
+    case 'UserPromptSubmit': a.status = 'working'; a.now = 'Thinking…'; break;
+    case 'PreToolUse': a.status = 'working'; a.now = `<b>${esc(e.tool)}</b> ${esc(e.detail || '')}`; break;
+    case 'PostToolUse': a.tools++; if (/^(Edit|Write|MultiEdit|NotebookEdit)$/.test(e.tool || '')) a.edits++; if (e.ok === false) a.errors++; break;
+    case 'PostToolUseFailure': a.tools++; a.errors++; a.now = `<b class="err">${esc(e.tool)} failed</b> ${esc(e.detail || '')}`; break;
+    case 'SubagentStart': a.status = 'working'; a.now = 'Starting…'; break;
+    case 'SubagentStop': a.status = 'done'; a.now = 'Finished and reported'; break;
+    case 'TeammateIdle': a.status = 'idle'; a.now = 'Idle'; break;
+    case 'TaskCreated': a.now = `<b>New task</b> ${esc(e.task || '')}`; break;
+    case 'TaskCompleted': a.now = `<b>Task done</b> ${esc(e.task || '')}`; break;
+    case 'Stop': a.status = a.role === 'lead' ? 'paused' : 'idle'; a.now = ''; break;
+    case 'Notification':
+      if (isApproval(e)) { a.status = 'approval'; a.now = `<b>Approve in the terminal</b> ${esc(e.message || '')}`; }
+      else if (a.status !== 'approval') { a.status = a.role === 'lead' ? 'paused' : 'idle'; a.now = ''; }
+      break;
+  }
+}
+
+// What a card shows. The lead's "turn ended" becomes "Team working" while any teammate is busy,
+// and "Your turn" only when nobody is working.
+function view(a, list) {
+  if (a.status === 'approval') return { badge:'Needs approval', cls:'error', now: a.now };
+  if (a.status === 'working' && Date.now() - a.last < 45000) return { badge:'Working', cls:'working', now: a.now };
+  if (a.status === 'done') return { badge:'Done', cls:'done', now: a.now || 'Finished and reported' };
+  if (a.role === 'lead' && a.status === 'paused') {
+    const busy = list.some((b) => b !== a && b.role !== 'lead' && b.status === 'working' && Date.now() - b.last < BUSY_MS);
+    return busy ? { badge:'Team working', cls:'teamwork', now:'Waiting for teammates to report' }
+                : { badge:'Your turn', cls:'waiting', now:'Finished — reply in the terminal' };
+  }
+  return { badge:'Idle', cls:'', now: a.now || 'Idle' };
+}
+
+function svg(role, size = 22) {
+  return `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICONS[role]}</svg>`;
+}
+
+function visibleAgents() {
+  const sel = $('session').value;
+  const list = [...agents.values()];
+  if (sel === 'all') return list;
+  if (sel) return list.filter((a) => a.session === sel);
+  return list.filter((a) => Date.now() - a.last < RECENT_MS);
+}
+
+function render() {
+  // session dropdown: "Active now" (default), "All", then each lead session
+  const sv = $('session'); const keep = sv.value;
+  sv.textContent = '';
+  const add = (v, t) => { const o = document.createElement('option'); o.value = v; o.textContent = t; sv.appendChild(o); };
+  add('', 'Active now'); add('all', 'Everything');
+  for (const a of [...agents.values()].filter((x) => x.role === 'lead').sort((x, y) => y.first - x.first)) add(a.session, displayName(a));
+  sv.value = [...sv.options].some((o) => o.value === keep) ? keep : '';
+
+  const list = visibleAgents().sort((x, y) => (x.role === 'lead' ? -1 : y.role === 'lead' ? 1 : x.first - y.first));
+  const team = $('team'); team.textContent = '';
+  if (!list.length) { const d = document.createElement('div'); d.className = 'empty'; d.textContent = 'Nothing running. Start Claude Code from ~/Projects and send a message — the lead appears here.'; team.appendChild(d); }
+  for (const a of list) {
+    const v = view(a, list);
+    const c = document.createElement('div');
+    c.className = 'card' + (v.cls === 'working' ? ' working' : '');
+    c.style.setProperty('--c', `var(--${a.role})`);
+    c.innerHTML = `
+      <div class="head">
+        <div class="avatar">${svg(a.role)}</div>
+        <div><div class="name"></div><div class="role">${ROLE_LABEL[a.role]}</div></div>
+        <span class="badge ${v.cls}">${v.badge}</span>
+      </div>
+      <div class="now">${v.now || '&nbsp;'}</div>
+      <div class="stats"><span><b>${a.tools}</b> tools</span><span><b>${a.edits}</b> edits</span><span><b>${a.errors}</b> errors</span><span>active ${ago(a.last)} ago</span></div>`;
+    c.querySelector('.name').textContent = displayName(a);
+    team.appendChild(c);
+  }
+
+  const fv = $('filter'); const fk = fv.value; fv.textContent = '';
+  const fo = (v, t) => { const o = document.createElement('option'); o.value = v; o.textContent = t; fv.appendChild(o); };
+  fo('', 'All agents'); for (const a of list) fo(a.key, displayName(a));
+  fv.value = [...fv.options].some((o) => o.value === fk) ? fk : '';
+
+  const keys = new Set(list.map((a) => a.key));
+  const feed = $('feed'); feed.textContent = '';
+  const rows = all.filter((e) => e.event !== 'PostToolUse' && keys.has(keyOf(e)) && (!fv.value || keyOf(e) === fv.value)).slice(-200).reverse();
+  for (const e of rows) {
+    const a = agents.get(keyOf(e));
+    const r = document.createElement('div'); r.className = 'row'; r.style.setProperty('--c', `var(--${a.role})`);
+    r.innerHTML = `<span class="t">${fmtTime(e.at)}</span><span class="ic">${svg(a.role, 16)}</span><span class="msg"><span class="who"></span><span class="ev"></span><span class="d"></span></span>`;
+    r.querySelector('.who').textContent = displayName(a);
+    r.querySelector('.ev').textContent = e.event === 'PreToolUse' ? (e.tool || '') : e.event === 'Notification' ? (isApproval(e) ? 'needs approval' : 'turn ended') : e.event;
+    r.querySelector('.d').textContent = e.event === 'Notification' ? '' : (e.detail || e.task || '');
+    feed.appendChild(r);
+  }
+}
+
+$('legend').innerHTML = Object.keys(ROLE_LABEL).map((r) => `<span style="color:var(--${r})">${svg(r, 16)}<span style="color:var(--muted)">${ROLE_LABEL[r]}</span></span>`).join('');
+
+let lastSeq = 0, pending = false;
+function schedule() { if (!pending) { pending = true; requestAnimationFrame(() => { pending = false; render(); }); } }
+fetch('/events').then((r) => r.json()).then((evs) => { evs.forEach((e) => { apply(e); lastSeq = e.seq; }); render(); connect(); });
+function connect() {
+  const es = new EventSource('/stream');
+  es.onopen = () => { $('live').classList.add('on'); $('status').textContent = 'live'; };
+  es.onerror = () => { $('live').classList.remove('on'); $('status').textContent = 'reconnecting…'; };
+  es.onmessage = (m) => { const e = JSON.parse(m.data); if (e.seq <= lastSeq) return; lastSeq = e.seq; apply(e); schedule(); };
+}
+$('session').onchange = render; $('filter').onchange = render;
+$('clear').onclick = () => fetch('/clear', { method: 'POST' });
+setInterval(render, 5000);
+</script>
+</body>
+</html>
